@@ -1,0 +1,59 @@
+# Builds ElectronicCats' custom badge firmware for the DG01 / LJ733 board (AC707N, chipkey 0xB165)
+# and packages it as a native RCSP OTA image (.ufw) that installs over the Jieli channel (AE00).
+#
+# Put this file in your fork of https://github.com/ElectronicCats/jieli-ble-badge-research at
+#   .github/workflows/build-dg01.yml
+# then open the Actions tab -> "Build DG01 badge firmware" -> Run workflow.
+# The finished .ufw is attached to the run as an artifact named "dg01-firmware".
+
+name: Build DG01 badge firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      menu:
+        description: "Custom badge menu (ticked) or JieLi's stock watch app for this board (unticked; safer first test)"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - name: Check out the repo (without the JieLi SDK submodule; setup fetches it)
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Free disk space (SDK checkout + build objects need ~3 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h .
+
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq git curl tar make python3 xz-utils
+
+      - name: Setup toolchain, JieLi SDK, badge patch, post-build tools
+        # Downloads JieLi's public Linux toolchain and post-build tools, and clones the
+        # vanilla SDK from JieLi's GitLab (~1.1 GB, can be slow from outside China).
+        run: |
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 600
+          scripts/setup-badge-build.sh
+
+      - name: Build and package the DG01 OTA image
+        run: |
+          mkdir -p firmware-builds
+          extra=""
+          if [ "${{ inputs.menu }}" != "true" ]; then extra="--no-menu"; fi
+          scripts/build-badge-fw.sh --board dg01 --clean $extra --ota firmware-builds/custom-fw-dg01.ufw
+          ls -l firmware-builds
+
+      - name: Upload the firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: dg01-firmware
+          path: |
+            firmware-builds/*.ufw
+          if-no-files-found: error
