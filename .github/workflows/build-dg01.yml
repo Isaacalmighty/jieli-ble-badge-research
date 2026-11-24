@@ -1,5 +1,8 @@
+# TEST BUILD - for the wired test badge (ZT2) ONLY. Not for your good badges yet.
+# Uses ElectronicCats' DG01 screen driver, which does NOT draw on the BG02 (LJ733_MB_V1.5) panel.
+# Bluetooth is started at BT init, before the screen, so a screen problem can't hide it.
 name: Build DG01 badge firmware
-
+ 
 on:
   workflow_dispatch:
     inputs:
@@ -7,7 +10,7 @@ on:
         description: "Keep Bluetooth update-ready at all times (recommended)"
         type: boolean
         default: true
-
+ 
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -20,45 +23,45 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: false
-
+ 
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
           df -h .
-
+ 
       - name: Install tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq git curl tar make python3 xz-utils \
             libegl1 libgl1 libglib2.0-0 libfontconfig1 libxkbcommon0 libdbus-1-3 libx11-6 libxext6 libxrender1
-
+ 
       - name: Setup toolchain, JieLi SDK, badge patch, post-build tools
         run: |
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 600
           sed -i 's/^readonly TOOLCHAIN_SHA256_EXPECTED=.*/readonly TOOLCHAIN_SHA256_EXPECTED="a1545cddbc451a06bac43eb5cd96d831470c42a97c5c0b1f98879a20fc7647bd"/' scripts/setup-jieli-toolchain.sh
           scripts/setup-badge-build.sh
-
+ 
       - name: Always update-ready Bluetooth
         if: ${{ inputs.always_update }}
         run: |
           python3 - "$SDK/SDK/apps/common/ui/lvgl_v8/lvgl_main.c" <<'PY'
           #!/usr/bin/env python3
           """Make the badge-menu firmware reachable for RCSP updates at all times.
-
+ 
           ElectronicCats' menu firmware keeps BLE off except on the Mouse / Update screens, so a new
           image can only be pushed from Settings -> Update. This edit keeps BLE advertising as EC-BADGE
           in the same update-safe state the Update screen uses (no SM bonding, no HID encryption,
           stale bonds cleared), at boot, on the charging screen and after leaving any BLE screen.
           The RCSP update handler itself is not tied to the Update screen.
-
+ 
           Every edit must match exactly once, otherwise the script fails and the build stops.
           """
           import sys
-
+ 
           path = sys.argv[1]
           src = open(path, encoding="utf-8").read()
-
+ 
           IDLE_FN = r'''
           /* [always-update] Keep BLE up in the Update screen's update-safe state so the phone can
            * push new firmware at any time, not only from Settings -> Update. */
@@ -78,7 +81,7 @@ jobs:
               printf("ble: idle-on (always update-ready)\n");
           }
           '''
-
+ 
           edits = [
               # 1. define ble_idle_on() right after ble_off()
               ('    printf("ble: off (conn=%d)\\n", bt_rcsp_ble_conn_num());\n}\n',
@@ -99,35 +102,63 @@ jobs:
               ('    g_ble_want_on = 0;\n    ble_off();\n\n    lv_scr_load(g_menu_scr);\n',
                '    g_ble_want_on = 0;\n    ble_off();\n    ble_idle_on();   /* [always-update] */\n\n    lv_scr_load(g_menu_scr);\n'),
           ]
-
+ 
           if "[always-update]" in src:
               print("always-update: already applied")
               sys.exit(0)
-
+ 
           for i, (old, new) in enumerate(edits, 1):
               n = src.count(old)
               if n != 1:
                   sys.exit(f"always-update: edit {i} matched {n} times (expected 1) - SDK/patch changed, not building")
               src = src.replace(old, new)
-
+ 
           open(path, "w", encoding="utf-8").write(src)
           print("always-update: applied", len(edits), "edits to", path)
+          PY
+          python3 - "$SDK/SDK/apps/common/third_party_profile/jieli/rcsp/ble_rcsp_server.c" <<'PY'
+          #!/usr/bin/env python3
+          """[always-update] Bring BLE up in the Bluetooth init itself (BT task), before and independent
+          of the UI/screen, in the update-safe state (no SM bonding). If the screen driver hangs or the
+          UI never starts, the badge still advertises and can still be updated over RCSP."""
+          import sys
+          path = sys.argv[1]
+          src = open(path, encoding="utf-8").read()
+          if "[always-update]" in src:
+              print("bt-early: already applied"); sys.exit(0)
+          old = "    (void)lp_mode;\n#else\n"
+          new = ("    (void)lp_mode;\n"
+                 "    {   /* [always-update] radio up at BT init, before the UI/screen; update-safe (no bonding) */\n"
+                 "        extern volatile u8 g_ble_want_on;\n"
+                 "        extern void sm_set_authentication_requirements(u8 auth_req);\n"
+                 "        sm_set_authentication_requirements(0x00);\n"
+                 "        g_ble_want_on = 1;\n"
+                 "        ble_module_enable(1);\n"
+                 "        printf(\"ble: early-on at BT init (always update-ready)\\n\");\n"
+                 "    }\n"
+                 "#else\n")
+          n = src.count(old)
+          if n != 1:
+              sys.exit(f"bt-early: matched {n} times (expected 1) - SDK/patch changed, not building")
+          open(path, "w", encoding="utf-8").write(src.replace(old, new))
+          print("bt-early: applied to", path)
           PY
           # Fold the edit into the badge patch so the build's "patch is applied" check stays truthful.
           git -C "$SDK" add -A -N .
           git -C "$SDK" diff --binary > "$PWD/patches/badge/badge-menu.patch"
           git -C "$SDK" apply --reverse --check "$PWD/patches/badge/badge-menu.patch"
-          grep -c "always-update" "$SDK/SDK/apps/common/ui/lvgl_v8/lvgl_main.c"
-
+          grep -c "always-update" "$SDK/SDK/apps/common/ui/lvgl_v8/lvgl_main.c" "$SDK/SDK/apps/common/third_party_profile/jieli/rcsp/ble_rcsp_server.c"
+ 
       - name: Build and package the DG01 OTA image
         run: |
           mkdir -p firmware-builds
           scripts/build-badge-fw.sh --board dg01 --clean --ota firmware-builds/custom-fw-dg01.ufw
           ls -l firmware-builds
-
+ 
       - name: Upload the firmware
         uses: actions/upload-artifact@v4
         with:
           name: dg01-firmware
           path: firmware-builds/*.ufw
           if-no-files-found: error
+ 
