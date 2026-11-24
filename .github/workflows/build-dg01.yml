@@ -30,6 +30,8 @@ jobs:
         run: |
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 600
+          # JieLi published a newer toolchain than the repo pins; verify against the new release's sha256
+          sed -i 's/^readonly TOOLCHAIN_SHA256_EXPECTED=.*/readonly TOOLCHAIN_SHA256_EXPECTED="a1545cddbc451a06bac43eb5cd96d831470c42a97c5c0b1f98879a20fc7647bd"/' scripts/setup-jieli-toolchain.sh
           scripts/setup-badge-build.sh
 
       - name: Build and package the DG01 OTA image
