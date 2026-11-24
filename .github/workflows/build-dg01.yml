@@ -12,6 +12,8 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 150
+    env:
+      QT_QPA_PLATFORM: offscreen
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
@@ -24,13 +26,15 @@ jobs:
           df -h .
 
       - name: Install tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq git curl tar make python3 xz-utils
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git curl tar make python3 xz-utils \
+            libegl1 libgl1 libglib2.0-0 libfontconfig1 libxkbcommon0 libdbus-1-3 libx11-6 libxext6 libxrender1
 
       - name: Setup toolchain, JieLi SDK, badge patch, post-build tools
         run: |
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 600
-          # JieLi published a newer toolchain than the repo pins; verify against the new release's sha256
           sed -i 's/^readonly TOOLCHAIN_SHA256_EXPECTED=.*/readonly TOOLCHAIN_SHA256_EXPECTED="a1545cddbc451a06bac43eb5cd96d831470c42a97c5c0b1f98879a20fc7647bd"/' scripts/setup-jieli-toolchain.sh
           scripts/setup-badge-build.sh
 
