@@ -1,0 +1,48 @@
+name: Build DG01 badge firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      menu:
+        description: "Custom badge menu (ticked) or JieLi's stock watch app for this board (unticked; safer first test)"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h .
+
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq git curl tar make python3 xz-utils
+
+      - name: Setup toolchain, JieLi SDK, badge patch, post-build tools
+        run: |
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 600
+          scripts/setup-badge-build.sh
+
+      - name: Build and package the DG01 OTA image
+        run: |
+          mkdir -p firmware-builds
+          extra=""
+          if [ "${{ inputs.menu }}" != "true" ]; then extra="--no-menu"; fi
+          scripts/build-badge-fw.sh --board dg01 --clean $extra --ota firmware-builds/custom-fw-dg01.ufw
+          ls -l firmware-builds
+
+      - name: Upload the firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: dg01-firmware
+          path: firmware-builds/*.ufw
+          if-no-files-found: error
