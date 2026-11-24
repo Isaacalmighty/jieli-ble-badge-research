@@ -3,10 +3,10 @@ name: Build DG01 badge firmware
 on:
   workflow_dispatch:
     inputs:
-      menu:
-        description: "Custom badge menu (ticked) or JieLi's stock watch app for this board (unticked; safer first test)"
+      always_update:
+        description: "Keep Bluetooth update-ready at all times (recommended)"
         type: boolean
-        default: false
+        default: true
 
 jobs:
   build:
@@ -14,6 +14,7 @@ jobs:
     timeout-minutes: 150
     env:
       QT_QPA_PLATFORM: offscreen
+      SDK: tools/community-re/jieli-sdks/e_badge_707_sdk_200
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
@@ -38,12 +39,90 @@ jobs:
           sed -i 's/^readonly TOOLCHAIN_SHA256_EXPECTED=.*/readonly TOOLCHAIN_SHA256_EXPECTED="a1545cddbc451a06bac43eb5cd96d831470c42a97c5c0b1f98879a20fc7647bd"/' scripts/setup-jieli-toolchain.sh
           scripts/setup-badge-build.sh
 
+      - name: Always update-ready Bluetooth
+        if: ${{ inputs.always_update }}
+        run: |
+          python3 - "$SDK/SDK/apps/common/ui/lvgl_v8/lvgl_main.c" <<'PY'
+          #!/usr/bin/env python3
+          """Make the badge-menu firmware reachable for RCSP updates at all times.
+
+          ElectronicCats' menu firmware keeps BLE off except on the Mouse / Update screens, so a new
+          image can only be pushed from Settings -> Update. This edit keeps BLE advertising as EC-BADGE
+          in the same update-safe state the Update screen uses (no SM bonding, no HID encryption,
+          stale bonds cleared), at boot, on the charging screen and after leaving any BLE screen.
+          The RCSP update handler itself is not tied to the Update screen.
+
+          Every edit must match exactly once, otherwise the script fails and the build stops.
+          """
+          import sys
+
+          path = sys.argv[1]
+          src = open(path, encoding="utf-8").read()
+
+          IDLE_FN = r'''
+          /* [always-update] Keep BLE up in the Update screen's update-safe state so the phone can
+           * push new firmware at any time, not only from Settings -> Update. */
+          static void ble_idle_on(void)
+          {
+              extern int  le_device_db_count(void);
+              extern void le_device_db_remove(int index);
+              extern void sm_set_authentication_requirements(u8 auth_req);
+              extern void rcsp_hid_att_require_encryption(u8 on);
+              int n = le_device_db_count();
+              while (n-- > 0) { le_device_db_remove(n); }          /* stale bonds break RCSP reconnects */
+              sm_set_authentication_requirements(0x00);             /* SM_AUTHREQ_NO_BONDING */
+              rcsp_hid_att_require_encryption(0);
+              g_badge_mouse_mode = 0;                               /* advertise as EC-BADGE */
+              g_ble_want_on = 1;
+              ble_on();
+              printf("ble: idle-on (always update-ready)\n");
+          }
+          '''
+
+          edits = [
+              # 1. define ble_idle_on() right after ble_off()
+              ('    printf("ble: off (conn=%d)\\n", bt_rcsp_ble_conn_num());\n}\n',
+               '    printf("ble: off (conn=%d)\\n", bt_rcsp_ble_conn_num());\n}\n' + IDLE_FN),
+              # 2. boot: BLE on instead of off
+              ('    ble_off();   /* boot: BLE off',
+               '    ble_idle_on();   /* [always-update] was: ble_off(); boot: BLE off'),
+              # 3. charging screen: keep update-ready after the teardown
+              ('    g_ble_want_on = 0;\n    ble_off();                  /* waits for the controller link to actually drop */\n',
+               '    g_ble_want_on = 0;\n    ble_off();                  /* waits for the controller link to actually drop */\n    ble_idle_on();              /* [always-update] */\n'),
+              # 4. leaving Mouse
+              ('    g_badge_mouse_mode = 0;    /* exits mouse mode so nothing re-advertises a stale "EC-MOUSE" */\n',
+               '    g_badge_mouse_mode = 0;    /* exits mouse mode so nothing re-advertises a stale "EC-MOUSE" */\n    ble_idle_on();             /* [always-update] */\n'),
+              # 5. leaving Update
+              ('    g_on_update_scr = 0;\n    g_ble_want_on = 0;\n    ble_off();\n    lv_scr_load(g_settings_scr);\n',
+               '    g_on_update_scr = 0;\n    g_ble_want_on = 0;\n    ble_off();\n    ble_idle_on();   /* [always-update] */\n    lv_scr_load(g_settings_scr);\n'),
+              # 6. leaving Scanner
+              ('    g_ble_want_on = 0;\n    ble_off();\n\n    lv_scr_load(g_menu_scr);\n',
+               '    g_ble_want_on = 0;\n    ble_off();\n    ble_idle_on();   /* [always-update] */\n\n    lv_scr_load(g_menu_scr);\n'),
+          ]
+
+          if "[always-update]" in src:
+              print("always-update: already applied")
+              sys.exit(0)
+
+          for i, (old, new) in enumerate(edits, 1):
+              n = src.count(old)
+              if n != 1:
+                  sys.exit(f"always-update: edit {i} matched {n} times (expected 1) - SDK/patch changed, not building")
+              src = src.replace(old, new)
+
+          open(path, "w", encoding="utf-8").write(src)
+          print("always-update: applied", len(edits), "edits to", path)
+          PY
+          # Fold the edit into the badge patch so the build's "patch is applied" check stays truthful.
+          git -C "$SDK" add -A -N .
+          git -C "$SDK" diff --binary > "$PWD/patches/badge/badge-menu.patch"
+          git -C "$SDK" apply --reverse --check "$PWD/patches/badge/badge-menu.patch"
+          grep -c "always-update" "$SDK/SDK/apps/common/ui/lvgl_v8/lvgl_main.c"
+
       - name: Build and package the DG01 OTA image
         run: |
           mkdir -p firmware-builds
-          extra=""
-          if [ "${{ inputs.menu }}" != "true" ]; then extra="--no-menu"; fi
-          scripts/build-badge-fw.sh --board dg01 --clean $extra --ota firmware-builds/custom-fw-dg01.ufw
+          scripts/build-badge-fw.sh --board dg01 --clean --ota firmware-builds/custom-fw-dg01.ufw
           ls -l firmware-builds
 
       - name: Upload the firmware
